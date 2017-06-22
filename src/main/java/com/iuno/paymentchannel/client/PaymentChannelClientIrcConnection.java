@@ -3,6 +3,10 @@ package com.iuno.paymentchannel.client;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.protobuf.ByteString;
+import com.iuno.paymentchannel.PcIrcMessage;
+import com.iuno.paymentchannel.PcIrcMessageRegistry;
+import com.iuno.paymentchannel.messages.*;
+import com.iuno.paymentchannel.server.PaymentChannelServerIrcListener;
 import com.lambdaworks.codec.Base64;
 import com.subgraph.orchid.encoders.Hex;
 import org.bitcoin.paymentchannel.Protos;
@@ -16,6 +20,9 @@ import org.pircbotx.MultiBotManager;
 import org.pircbotx.PircBotX;
 import org.pircbotx.exception.IrcException;
 import org.pircbotx.hooks.ListenerAdapter;
+import org.pircbotx.hooks.events.ConnectEvent;
+import org.pircbotx.hooks.events.JoinEvent;
+import org.pircbotx.hooks.events.MessageEvent;
 import org.pircbotx.hooks.events.PrivateMessageEvent;
 import org.pircbotx.hooks.types.GenericMessageEvent;
 import org.spongycastle.crypto.params.KeyParameter;
@@ -34,39 +41,55 @@ public class PaymentChannelClientIrcConnection extends ListenerAdapter{
     private final SettableFuture<PaymentChannelClientIrcConnection> channelOpenFuture = SettableFuture.create();
     private final PaymentChannelClient channelClient;
     private final PircBotX botX;
+    private final PcIrcMessageRegistry messageRegistry;
+    private final ECKey ownKey;
+    private final String serverAddress;
+    private final String clientAddress;
     private MultiBotManager manager;
-    private String ircAddress;
     private boolean connected = false;
     private int dataToBeReceived;
     private StringBuilder builder;
     private ECKey serverKey;
     private String challenge;
 
-    public PaymentChannelClientIrcConnection(final String ircAddress, String pubKey, Wallet wallet, ECKey myKey,
-                                             Coin maxValue, String serverId, @Nullable KeyParameter userKeySetup) throws IOException, IrcException {
-        this.ircAddress = ircAddress;
-        this.serverKey = ECKey.fromPublicOnly(Hex.decode(pubKey));
-        channelClient = new PaymentChannelClient(wallet, myKey,maxValue, Sha256Hash.of(serverId.getBytes()), new PaymentChannelClient.ClientConnection()
+    public static final String CHANNEL = "#tdmiunopaymentchannel";
+
+    public PaymentChannelClientIrcConnection(String ownIrcAddress, ECKey ownKey, ECKey serverKey, Wallet wallet, ECKey myKey,
+                                             Coin maxValue) throws IOException, IrcException {
+
+        this.serverKey = serverKey;
+        this.ownKey = ownKey;
+        this.messageRegistry = PcIrcMessageRegistry.createStandardRegistry();
+        this.serverAddress = serverKey.getPublicKeyAsHex().substring(0,10);
+        this.clientAddress = ownKey.getPublicKeyAsHex().substring(0,10);
+
+        channelClient = new PaymentChannelClient(wallet, myKey,maxValue, Sha256Hash.of((serverAddress+clientAddress).getBytes()), new PaymentChannelClient.ClientConnection()
         {
             public void sendToServer(Protos.TwoWayChannelMessage msg) {
-                StringBuilder builder = new StringBuilder();
-                builder.append("DATA");
                 String message =  String.copyValueOf(Base64.encode(msg.toByteArray()));
-                int length = message.length() + 8;
-                String lengthString = String.format("%04d",length);
-                builder.append(lengthString);
-                builder.append(message);
-                for(int i = 0; i < length; i=i+200){
-                    if(i+200 >= length){
-                        botX.send().message(ircAddress,builder.toString().substring(i));
-                    }else{
-                        botX.send().message(ircAddress,builder.toString().substring(i,i+200));
+                int length = message.length();
+                if(length < 200){
+                    PcIrcDataMessage dataMessage = new PcIrcDataMessage(serverAddress,clientAddress,length,message);
+                    botX.sendIRC().message(CHANNEL,dataMessage.getMessage());
+                }else{
+                    PcIrcDataMessage dataMessage = new PcIrcDataMessage(serverAddress,clientAddress,length, message.substring(0,200));
+                    botX.sendIRC().message(CHANNEL,dataMessage.getMessage());
+                    for(int i = 200; i < length; i=i+200){
+                        if(i+200 >= length){
+                            PcIrcResumeMessage resumeMessage = new PcIrcResumeMessage(serverAddress,clientAddress, message.substring(i));
+                            botX.sendIRC().message(CHANNEL,resumeMessage.getMessage());
+                        }else{
+                            PcIrcResumeMessage resumeMessage = new PcIrcResumeMessage(serverAddress,clientAddress, message.substring(i,i+200));
+                            botX.sendIRC().message(CHANNEL,resumeMessage.getMessage());
+                        }
                     }
+
                 }
             }
 
             public void destroyConnection(PaymentChannelCloseException.CloseReason reason) {
-                botX.send().message(ircAddress,"disconnect");
+                PcIrcDisconnectMessage disconnectMessage = new PcIrcDisconnectMessage(serverAddress,clientAddress);
+                botX.sendIRC().message(CHANNEL,disconnectMessage.getMessage());
 
             }
 
@@ -80,9 +103,10 @@ public class PaymentChannelClientIrcConnection extends ListenerAdapter{
         });
 
         Configuration.Builder templateConfig = new Configuration.Builder()
-                .setName("machine0iuno")
+                .setName(ownIrcAddress)
                 .setAutoNickChange(true)
-                .addListener(this);
+                .addListener(this)
+                .addAutoJoinChannel(CHANNEL);
 
         manager = new MultiBotManager();
         manager.addBot(templateConfig.buildForServer("irc.freenode.net"));
@@ -93,80 +117,109 @@ public class PaymentChannelClientIrcConnection extends ListenerAdapter{
 
     }
 
+
     @Override
-    public void onPrivateMessage(PrivateMessageEvent event) throws Exception {
-        if(!event.getUser().getNick().equals(ircAddress)){
-            //thats not the one we want to talk with...
+    public void onMessage(MessageEvent event) throws Exception {
+        String message = event.getMessage();
+        String receiverAddress = message.substring(0,10);
+        String messageType = message.substring(20,24);
+        if(!clientAddress.equals(receiverAddress)){
             return;
         }
+        PcIrcMessage pcMessage = null;
+        if(!messageRegistry.contains(messageType)){
+            return;
+        }
+        pcMessage = messageRegistry.get(messageType).create(message);
 
-        if(event.getMessage().startsWith("disconnect")){
-            channelClient.connectionClosed();
-            disconnectWithoutSettlement();
-        }else if(event.getMessage().startsWith("connected") && event.getMessage().length() == 97){
-            String signedMessage = event.getMessage().substring(9);
+        String senderAddress = pcMessage.getSenderAddress();
+
+
+
+        if(pcMessage.getClass().equals(PcIrcConnectedMessage.class)){
+            PcIrcConnectedMessage connectedMessage = (PcIrcConnectedMessage)pcMessage;
             try{
-                serverKey.verifyMessage(challenge,signedMessage);
+                serverKey.verifyMessage(challenge,connectedMessage.getSignature());
                 channelClient.connectionOpen();
             }catch (SignatureException e){
                 System.out.println(e);
-                botX.send().message(ircAddress, "disconnect");
+                PcIrcDisconnectMessage disconnectMessage = new PcIrcDisconnectMessage(serverAddress,clientAddress);
+                botX.sendIRC().message(CHANNEL,disconnectMessage.getMessage());
             }
 
 
+        }else if(pcMessage.getClass().equals(PcIrcDisconnectMessage.class)) {
+            channelClient.connectionClosed();
+            disconnectWithoutSettlement();
 
-        }else if(event.getMessage().startsWith("DATA")){
+        }else if(pcMessage.getClass().equals(PcIrcDataMessage.class)) {
+            PcIrcDataMessage dataMessage = (PcIrcDataMessage) pcMessage;
 
-            int length = Integer.parseInt(event.getMessage().substring(4,8));
-            dataToBeReceived = length - event.getMessage().length();
+
+            dataToBeReceived = dataMessage.getLength() -  dataMessage.getData().length();
 
             if (dataToBeReceived == 0){
                 try{
-                    Protos.TwoWayChannelMessage message = Protos.TwoWayChannelMessage.parseFrom(Base64.decode(event.getMessage().substring(8).toCharArray()));
-                    channelClient.receiveMessage(message);
+                    Protos.TwoWayChannelMessage protoMess = Protos.TwoWayChannelMessage.parseFrom(Base64.decode(dataMessage.getData().toCharArray()));
+                    channelClient.receiveMessage(protoMess);
                 }catch(Exception e){
-                    System.out.println(e);
-                    botX.send().message(ircAddress,"disconnect");
+                    System.out.println();
                 }
+
             }else{
                 builder = new StringBuilder();
-                builder.append(event.getMessage().substring(8));
+                builder.append(dataMessage.getData());
             }
+        }else if(pcMessage.getClass().equals(PcIrcResumeMessage.class)) {
+            PcIrcResumeMessage resumeMessage = (PcIrcResumeMessage) pcMessage;
 
-        }else if(dataToBeReceived > 0){
-            dataToBeReceived = dataToBeReceived - event.getMessage().length();
-            builder.append(event.getMessage());
-            if(dataToBeReceived == 0){
-                try{
-                    Protos.TwoWayChannelMessage message = Protos.TwoWayChannelMessage.parseFrom(Base64.decode(builder.toString().toCharArray()));
-                    channelClient.receiveMessage(message);
-                }catch(Exception e){
-                    System.out.println(e);
-                    botX.send().message(ircAddress,"disconnect");
+            if(dataToBeReceived > 0){
+                dataToBeReceived = dataToBeReceived - resumeMessage.getData().length();
+                builder.append(resumeMessage.getData());
+                if(dataToBeReceived == 0){
+                    try{
+                        Protos.TwoWayChannelMessage protoMess = Protos.TwoWayChannelMessage.parseFrom(Base64.decode(builder.toString().toCharArray()));
+                        channelClient.receiveMessage(protoMess);
+                    }catch(Exception e){
+                        System.out.println();
+                    }
+
                 }
+            }else{
+                PcIrcDisconnectMessage disconnectMessage = new PcIrcDisconnectMessage(senderAddress, receiverAddress);
+                botX.sendIRC().message(CHANNEL,disconnectMessage.getMessage());
             }
         }
-        super.onPrivateMessage(event);
+
+
+        super.onMessage(event);
+
     }
+
+
+//    @Override
+//    public void onConnect(ConnectEvent event) throws Exception {
+//        if(botX.isConnected() && !connected){
+//
+//        }
+//        super.onConnect(event);
+//    }
 
     @Override
-    synchronized public void onGenericMessage(GenericMessageEvent event) throws Exception {
-        if(event.getUser() == null){
+    public void onJoin(JoinEvent event) throws Exception {
+        if(event.getChannel().getName().equals(CHANNEL)){
+            byte[] random = new SecureRandom().generateSeed(30);
+            challenge = String.copyValueOf(Base64.encode(random));
 
-            if(botX.isConnected() && !connected){
-                byte[] random = new SecureRandom().generateSeed(30);
-                challenge = String.copyValueOf(Base64.encode(random));
-                String connectMessage = "connect" + challenge;
-
-                botX.send().message(ircAddress,connectMessage);
-                connected = true;
-            }
-            return;
+            PcIrcConnectMessage connectMessage =
+                    new PcIrcConnectMessage(serverAddress,clientAddress,
+                            serverKey.getPublicKeyAsHex(), ownKey.getPublicKeyAsHex(),challenge);
+            botX.sendIRC().message(CHANNEL,connectMessage.getMessage());
+            connected = true;
         }
 
-        super.onGenericMessage(event);
+        super.onJoin(event);
     }
-
 
     public ListenableFuture<PaymentChannelClientIrcConnection> getChannelOpenFuture() {
         return channelOpenFuture;
@@ -217,7 +270,8 @@ public class PaymentChannelClientIrcConnection extends ListenerAdapter{
         // then configures the open-future correctly and closes the state object. Phew!
         try {
             channelClient.settle();
-            botX.send().message(ircAddress,"disconnect");
+            PcIrcDisconnectMessage disconnectMessage = new PcIrcDisconnectMessage(serverAddress,clientAddress);
+            botX.sendIRC().message(CHANNEL, disconnectMessage.getMessage());
             manager.stopAndWait();
         } catch (IllegalStateException e) {
             // Already closed...oh well
@@ -232,7 +286,8 @@ public class PaymentChannelClientIrcConnection extends ListenerAdapter{
      */
     public void disconnectWithoutSettlement() {
         if(botX != null && botX.isConnected()){
-            botX.send().message(ircAddress,"disconnect");
+            PcIrcDisconnectMessage disconnectMessage = new PcIrcDisconnectMessage(serverAddress,clientAddress);
+            botX.sendIRC().message(CHANNEL, disconnectMessage.getMessage());
         }
         try {
             if(manager != null){

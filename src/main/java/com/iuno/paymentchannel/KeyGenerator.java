@@ -12,7 +12,7 @@ import java.security.SecureRandom;
 public class KeyGenerator {
 
     public static void main(String[] args){
-        ECKey key = new ECKey(new SecureRandom());
+        ECKey key = new ECKey();
         System.out.println(String.format("The PrivKey: %s", key.getPrivateKeyAsHex()));
         System.out.println(String.format("The PubKey: %s", key.getPublicKeyAsHex()));
     }

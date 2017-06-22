@@ -3,10 +3,8 @@ package com.iuno.paymentchannel.server;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.ByteString;
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.core.NetworkParameters;
-import org.bitcoinj.core.Sha256Hash;
-import org.bitcoinj.core.VerificationException;
+import com.subgraph.orchid.encoders.Hex;
+import org.bitcoinj.core.*;
 import org.bitcoinj.kits.WalletAppKit;
 import org.bitcoinj.params.RegTestParams;
 import org.bitcoinj.params.TestNet3Params;
@@ -62,8 +60,13 @@ public class PaymentChannelServerExample implements PaymentChannelServerIrcListe
         // We provide a peer group, a wallet, a timeout in seconds, the amount we require to start a channel and
         // an implementation of HandlerFactory, which we just implement ourselves.
         //new PaymentChannelServerListener(appKit.peerGroup(), appKit.wallet(), timeoutSeconds, Coin.valueOf(100000), this).bindAndStart(4242);
-        new PaymentChannelServerIrcListener(appKit.peerGroup(),appKit.wallet(),
-                Coin.valueOf(100000), this).start("tdmiuno");
+        PaymentChannelServerIrcListener paymentChannelServerIrcListener =
+                new PaymentChannelServerIrcListener(appKit.peerGroup(),appKit.wallet(),
+                Coin.valueOf(100000), this);
+        ECKey receivingAddress1 = ECKey.fromPrivate(Hex.decode("d4ecd120ad03a24ac076c5d2221c5a8a53e460e3c24ea203b70dff618d16827f"));
+        paymentChannelServerIrcListener.addReceivingKey(receivingAddress1);
+
+        paymentChannelServerIrcListener.start("tdmiuno");
     }
 
 

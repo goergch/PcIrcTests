@@ -6,6 +6,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.Uninterruptibles;
 import com.google.protobuf.ByteString;
+import com.subgraph.orchid.encoders.Hex;
 import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.ECKey;
 import org.bitcoinj.core.NetworkParameters;
@@ -20,7 +21,9 @@ import org.bitcoinj.wallet.Wallet;
 import org.bitcoinj.wallet.WalletExtension;
 import org.pircbotx.exception.IrcException;
 import org.slf4j.LoggerFactory;
+import org.spongycastle.crypto.params.KeyParameter;
 
+import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -92,15 +95,11 @@ public class PaymentChannelClientExample {
 
         waitForSufficientBalance(channelSize);
         final String channelID = host;
-        // Do this twice as each one sends 1/10th of a bitcent 5 times, so to send a bitcent, we do it twice. This
-        // demonstrates resuming a channel that wasn't closed yet. It should close automatically once we run out
-        // of money on the channel.
-//        log.info("Round one ...");
-//        openAndSend(timeoutSeconds, server, channelID, 5, clientChannelProperties);
-//        log.info("Round two ...");
-//        log.info(appKit.wallet().toString());
-//        openAndSend(timeoutSeconds, server, channelID, 4, clientChannelProperties);   // 4 times because the opening of the channel made a payment.
-        openAndSend(timeoutSeconds, host,"02707051c4a1231b47afb1667060f450f08566013c02fdb807049f23458012c80b", channelID, 1000, "4711");
+
+        ECKey ownKey = ECKey.fromPrivate(Hex.decode("b88b0c780f980ab9d5c0e651703bd51ed3e78528f3d88146ce5df0824b01edf6"));
+        ECKey serverKey = ECKey.fromPublicOnly(Hex.decode("0205257e70e26402d03a7f96a625946c96e59394218d619f8f695ceb4f3f677fb7"));
+
+        openAndSend(ownKey,serverKey,1000,"4711");
 
         log.info("Stopping ...");
         appKit.stopAsync();
@@ -108,13 +107,14 @@ public class PaymentChannelClientExample {
     }
 
 
-    private void openAndSend(int timeoutSecs, String host, String pubKey, String channelID, final long amount, final String invoiceId) throws IOException, ValueOutOfRangeException, InterruptedException {
+    private void openAndSend(ECKey ownKey, ECKey serverKey, final long amount, final String invoiceId) throws IOException, ValueOutOfRangeException, InterruptedException {
         // Use protocol version 1 for simplicity
 //        PaymentChannelClientConnection client = new PaymentChannelClientConnection(
 //                server, timeoutSecs, appKit.wallet(), myKey, channelSize, channelID, null,);
         PaymentChannelClientIrcConnection client = null;
         try {
-            client = new PaymentChannelClientIrcConnection(host, pubKey, appKit.wallet(), myKey, channelSize, channelID, null);
+            client = new PaymentChannelClientIrcConnection("machineTest", ownKey, serverKey,appKit.wallet(), myKey,
+                    channelSize);
         } catch (IrcException e) {
             e.printStackTrace();
         }
